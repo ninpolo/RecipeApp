@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="bg">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f3f5ef">
+  <title>Моите продукти | Вкус у дома</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/locale.js" defer></script>
+  <script src="/auth-state.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Вкус у дома — начало"><span class="brand-mark">✳</span> Вкус у дома</a>
+      <button id="edit-toggle" class="text-button" type="button">Редактирай</button>
+    </header>
+
+    <section class="page-heading" aria-labelledby="page-title">
+      <div>
+        <h1 id="page-title">Моите продукти</h1>
+      </div>
+      <div class="product-count" aria-label="Брой продукти"><strong id="product-count">0</strong><span class="visually-hidden">продукта</span></div>
+    </section>
+
+    <section class="add-section" aria-label="Добавяне на продукт">
+      <button id="add-toggle" class="add-toggle" type="button" aria-expanded="false" aria-controls="product-form-wrap">
+        <span class="plus" aria-hidden="true">+</span> Добави продукт
+      </button>
+      <div id="product-form-wrap" class="form-wrap" hidden>
+        <form id="product-form">
+          <label>Име на продукта
+            <div class="suggestion-field">
+              <input name="name" id="product-name" required maxlength="100" placeholder="Например: домати" autocomplete="off" aria-autocomplete="list" aria-controls="product-suggestions">
+              <ul id="product-suggestions" class="suggestions" role="listbox" hidden></ul>
+            </div>
+            <span class="field-hint">Онлайн предложенията се търсят на английски; можеш да въведеш име и ръчно.</span>
+          </label>
+          <div class="form-grid">
+            <label>Количество<input name="quantity" type="number" min="0.01" step="0.01" required placeholder="1"></label>
+            <label>Мерна единица<select name="unit" required><option value="бр.">бр.</option><option value="г">г</option><option value="кг">кг</option><option value="мл">мл</option><option value="л">л</option><option value="пакет">пакет</option></select></label>
+          </div>
+          <label>Категория<select name="productCategoryId" id="category-select"><option value="">Без категория</option></select></label>
+          <p id="form-error" class="error" role="alert" hidden></p>
+          <div class="form-actions"><button id="cancel-add" class="secondary-button" type="button">Отказ</button><button class="primary-button" type="submit">Запази продукта</button></div>
+        </form>
+      </div>
+    </section>
+
+    <div class="inventory-layout">
+      <nav id="category-tabs" class="category-tabs" aria-label="Филтриране по категория"></nav>
+      <section class="inventory-section" aria-labelledby="inventory-title">
+        <div class="section-heading"><h2 id="inventory-title">Вкъщи</h2><span id="list-caption" class="muted">Зареждане на продуктите…</span></div>
+        <div id="inventory-list" class="inventory-list" aria-live="polite"></div>
+        <p id="empty-state" class="empty-state" hidden>Списъкът е празен. Добави първия продукт, който имаш вкъщи.</p>
+        <p id="load-error" class="error" role="alert" hidden></p>
+      </section>
+    </div>
+
+    <footer class="bottom-action">
+      <a class="recipes-button" href="/recipes.html">Виж рецепти <span aria-hidden="true">→</span></a>
+      <p>Рецептите ще използват продуктите от този списък.</p>
+    </footer>
+  </main>
+</body>
+</html>

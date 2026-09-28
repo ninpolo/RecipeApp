@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="bg">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f3f5ef">
+  <title>Рецепти | Вкус у дома</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/locale.js" defer></script>
+  <script src="/auth-state.js" defer></script>
+  <script src="/recipes.js" defer></script>
+</head>
+<body>
+  <main class="app-shell recipes-shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Вкус у дома — начало"><span class="brand-mark">✳</span> Вкус у дома</a>
+      <a class="text-button back-to-products" href="/">Към продуктите</a>
+    </header>
+
+    <section class="page-heading recipes-heading" aria-labelledby="recipes-title">
+      <div>
+        <p class="eyebrow">ИДЕИ ЗА ГОТВЕНЕ</p>
+        <h1 id="recipes-title">Рецепти</h1>
+        <p class="subtitle">Избери какво ти се хапва днес.</p>
+      </div>
+      <div class="product-count" aria-label="Брой рецепти"><strong id="recipe-count">3</strong><span>рецепти</span></div>
+    </section>
+
+    <section class="recipe-search-section" aria-label="Търсене на рецепти">
+      <form id="recipe-search-form" class="recipe-search-form">
+        <label class="visually-hidden" for="recipe-search">Търси рецепта</label>
+        <input id="recipe-search" type="search" placeholder="Търси рецепта..." autocomplete="off">
+        <button class="recipe-search-button" type="submit">Търси</button>
+      </form>
+    </section>
+
+    <div class="recipe-modes" role="group" aria-label="Филтър за налични продукти">
+      <button class="recipe-mode active" type="button" data-mode="pantry" aria-pressed="true">С моите продукти</button>
+      <button class="recipe-mode" type="button" data-mode="all" aria-pressed="false">Всички рецепти</button>
+      <button class="recipe-mode" type="button" data-mode="favorites" aria-pressed="false">Любими</button>
+    </div>
+
+    <div class="inventory-layout recipe-layout">
+      <nav class="category-tabs" aria-label="Категории рецепти">
+        <button class="category-tab active" type="button" data-category="" aria-pressed="true">Всички</button>
+        <button class="category-tab" type="button" data-category="Закуска" aria-pressed="false">Закуска</button>
+        <button class="category-tab" type="button" data-category="Обяд" aria-pressed="false">Обяд</button>
+        <button class="category-tab" type="button" data-category="Вечеря" aria-pressed="false">Вечеря</button>
+        <button class="category-tab" type="button" data-category="Десерт" aria-pressed="false">Десерт</button>
+      </nav>
+      <section class="inventory-section recipe-section" aria-labelledby="recipe-list-title">
+        <div class="section-heading">
+          <h2 id="recipe-list-title">Подбрани рецепти</h2>
+          <span id="recipe-status" class="muted">Зареждам рецепти…</span>
+        </div>
+        <div id="recipe-list" class="recipe-list" aria-live="polite"></div>
+        <nav id="recipe-pagination" class="recipe-pagination" aria-label="Страници с рецепти" hidden></nav>
+        <p id="recipe-empty" class="empty-state" hidden>Няма рецепти по тези филтри.</p>
+        <p id="recipe-error" class="error" role="alert" hidden></p>
+      </section>
+    </div>
+
+    <footer class="bottom-action recipe-footer">
+      <a class="recipes-button back-button" href="/">← Към моите продукти</a>
+      <p>Рецептите се намират според продуктите, които имаш вкъщи.</p>
+    </footer>
+  </main>
+</body>
+</html>

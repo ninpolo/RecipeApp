@@ -1,0 +1,26 @@
+# .NET build output and IDE files
+bin/
+obj/
+work/
+.vs/
+*.user
+*.suo
+
+# Local-only configuration and credentials
+appsettings.Development.json
+secrets.json
+.env
+.env.*
+!.env.example
+
+# Database files and exports: keep schema scripts under Database/ in Git,
+# but never commit live database data or backups.
+*.mdf
+*.ldf
+*.bak
+*.bacpac
+*.sql.bak
+
+# OS files
+Thumbs.db
+Desktop.ini

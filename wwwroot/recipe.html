@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="bg">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f3f5ef">
+  <title>Рецепта | Вкус у дома</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/locale.js" defer></script>
+  <script src="/auth-state.js" defer></script>
+  <script src="/recipe-detail.js" defer></script>
+</head>
+<body>
+  <main class="app-shell recipe-detail-shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Вкус у дома — начало"><span class="brand-mark">✳</span> Вкус у дома</a>
+      <a id="recipe-back" class="text-button back-to-products" href="/recipes.html">Към рецептите</a>
+    </header>
+    <p id="detail-error" class="error" role="alert" hidden></p>
+    <article id="recipe-page" class="recipe-page" hidden>
+      <header class="recipe-detail-heading">
+        <div>
+          <p class="eyebrow">ОТКЪС ОТ КНИГАТА С РЕЦЕПТИ</p>
+          <h1 id="detail-title">Рецепта</h1>
+          <p id="detail-facts" class="subtitle"></p>
+        </div>
+        <figure id="detail-photo" class="recipe-detail-photo" hidden></figure>
+      </header>
+      <div class="recipe-detail-actions">
+        <button id="favorite-button" class="secondary-button" type="button">♡ Запази като любима</button>
+        <button id="add-missing-button" class="primary-button" type="button">Добави липсващите продукти</button>
+      </div>
+      <p id="detail-feedback" class="detail-feedback" aria-live="polite"></p>
+      <p id="detail-language-note" class="translation-note" hidden>Автоматичен превод от английски. Източникът е оригиналната рецепта.</p>
+      <section class="recipe-detail-paper inventory-section" aria-labelledby="ingredients-heading">
+        <div class="section-heading"><h2 id="ingredients-heading">Необходими продукти</h2><span id="ingredient-status" class="muted"></span></div>
+        <ul id="detail-ingredients" class="detail-ingredients"></ul>
+      </section>
+      <section class="recipe-detail-paper inventory-section steps-paper" aria-labelledby="steps-heading">
+        <div class="section-heading"><h2 id="steps-heading">Начин на приготвяне</h2></div>
+        <ol id="detail-steps" class="detail-steps"></ol>
+      </section>
+      <a id="detail-source" class="recipe-source source-button" hidden target="_blank" rel="noopener noreferrer">Оригинална рецепта ↗</a>
+    </article>
+    <p id="detail-loading" class="loading-note">Зареждам рецептата…</p>
+  </main>
+</body>
+</html>

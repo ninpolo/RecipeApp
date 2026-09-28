@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="bg">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f3f5ef">
+  <title>Профил | Вкус у дома</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/locale.js" defer></script>
+  <script src="/login.js" defer></script>
+</head>
+<body>
+  <main class="app-shell login-shell">
+    <header class="topbar"><a class="brand" href="/"><span class="brand-mark">✳</span> Вкус у дома</a></header>
+    <section class="login-paper">
+      <p class="eyebrow">ВКУС У ДОМА</p>
+      <h1 id="login-title">Влез в профила си</h1>
+      <p id="login-intro">Продуктите ти ще се синхронизират между устройствата.</p>
+      <form id="account-form">
+        <label>Имейл<input name="email" type="email" autocomplete="email" maxlength="254" required></label>
+        <label>Парола<input name="password" type="password" autocomplete="current-password" minlength="10" maxlength="128" required></label>
+        <p class="field-hint" id="password-hint" hidden>Използвай поне 10 знака.</p>
+        <p class="error" id="account-error" role="alert" hidden></p>
+        <button class="primary-button" id="submit-account" type="submit">Вход</button>
+      </form>
+      <p class="account-toggle"><span id="toggle-copy">Нямаш профил?</span> <button class="text-button" id="toggle-mode" type="button">Създай профил</button></p>
+    </section>
+  </main>
+</body>
+</html>
