@@ -26,7 +26,7 @@ public sealed class RecipeAppContext(DbContextOptions<RecipeAppContext> options)
             entity.Property(user => user.Email).HasMaxLength(254).IsRequired();
             entity.Property(user => user.NormalizedEmail).HasMaxLength(254).IsRequired();
             entity.Property(user => user.PasswordHash).HasMaxLength(500).IsRequired();
-            entity.Property(user => user.CreatedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+            entity.Property(user => user.CreatedAt).HasDefaultValueSql("timezone('utc', now())");
             entity.HasIndex(user => user.NormalizedEmail).IsUnique();
         });
 
@@ -35,7 +35,7 @@ public sealed class RecipeAppContext(DbContextOptions<RecipeAppContext> options)
             entity.ToTable("RecipeFavorites");
             entity.HasKey(favorite => new { favorite.UserId, favorite.RecipeId });
             entity.Property(favorite => favorite.UserId).HasMaxLength(32);
-            entity.Property(favorite => favorite.CreatedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+            entity.Property(favorite => favorite.CreatedAt).HasDefaultValueSql("timezone('utc', now())");
             entity.HasOne(favorite => favorite.User).WithMany().HasForeignKey(favorite => favorite.UserId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(favorite => favorite.Recipe).WithMany().HasForeignKey(favorite => favorite.RecipeId).OnDelete(DeleteBehavior.Cascade);
         });
@@ -64,7 +64,7 @@ public sealed class RecipeAppContext(DbContextOptions<RecipeAppContext> options)
             entity.Property(product => product.CatalogItemId).HasMaxLength(100);
             entity.HasIndex(product => product.Name).IsUnique();
             entity.HasIndex(product => new { product.CatalogProvider, product.CatalogItemId }).IsUnique()
-                .HasFilter("[CatalogProvider] IS NOT NULL AND [CatalogItemId] IS NOT NULL");
+                .HasFilter("\"CatalogProvider\" IS NOT NULL AND \"CatalogItemId\" IS NOT NULL");
             entity.HasOne(product => product.Category)
                 .WithMany(category => category.Products)
                 .HasForeignKey(product => product.ProductCategoryId);
@@ -76,7 +76,7 @@ public sealed class RecipeAppContext(DbContextOptions<RecipeAppContext> options)
             entity.HasKey(item => item.InventoryItemId);
             entity.Property(item => item.Quantity).HasPrecision(10, 2);
             entity.Property(item => item.Unit).HasMaxLength(20).IsRequired();
-            entity.Property(item => item.AddedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+            entity.Property(item => item.AddedAt).HasDefaultValueSql("timezone('utc', now())");
             entity.Property(item => item.UserId).HasMaxLength(32);
             entity.HasIndex(item => new { item.UserId, item.ProductId, item.Unit }).IsUnique();
             entity.HasOne(item => item.User).WithMany().HasForeignKey(item => item.UserId).OnDelete(DeleteBehavior.Cascade);
@@ -98,10 +98,10 @@ public sealed class RecipeAppContext(DbContextOptions<RecipeAppContext> options)
             entity.Property(recipe => recipe.SourceUrl).HasMaxLength(2048);
             entity.Property(recipe => recipe.ImageUrl).HasMaxLength(2048);
             entity.Property(recipe => recipe.IsSaved).HasDefaultValue(false);
-            entity.Property(recipe => recipe.CreatedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+            entity.Property(recipe => recipe.CreatedAt).HasDefaultValueSql("timezone('utc', now())");
             entity.HasIndex(recipe => new { recipe.SourceProvider, recipe.ProviderRecipeId })
                 .IsUnique()
-                .HasFilter("[SourceProvider] IS NOT NULL AND [ProviderRecipeId] IS NOT NULL");
+                .HasFilter("\"SourceProvider\" IS NOT NULL AND \"ProviderRecipeId\" IS NOT NULL");
             entity.HasOne(recipe => recipe.Category)
                 .WithMany(category => category.Recipes)
                 .HasForeignKey(recipe => recipe.RecipeCategoryId);
@@ -144,12 +144,12 @@ public sealed class RecipeAppContext(DbContextOptions<RecipeAppContext> options)
             entity.Property(translation => translation.Language).HasMaxLength(10).IsRequired();
             entity.Property(translation => translation.SourceHash).HasMaxLength(64).IsRequired();
             entity.Property(translation => translation.Title).HasMaxLength(500).IsRequired();
-            entity.Property(translation => translation.IngredientNamesJson).HasColumnType("nvarchar(max)").IsRequired();
-            entity.Property(translation => translation.IngredientUnitsJson).HasColumnType("nvarchar(max)").IsRequired();
-            entity.Property(translation => translation.StepInstructionsJson).HasColumnType("nvarchar(max)").IsRequired();
-            entity.Property(translation => translation.CreatedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+            entity.Property(translation => translation.IngredientNamesJson).HasColumnType("text").IsRequired();
+            entity.Property(translation => translation.IngredientUnitsJson).HasColumnType("text").IsRequired();
+            entity.Property(translation => translation.StepInstructionsJson).HasColumnType("text").IsRequired();
+            entity.Property(translation => translation.CreatedAt).HasDefaultValueSql("timezone('utc', now())");
             entity.HasIndex(translation => new
-                { translation.ProviderRecipeId, translation.Language, translation.SourceHash })
+            { translation.ProviderRecipeId, translation.Language, translation.SourceHash })
                 .IsUnique();
         });
     }
