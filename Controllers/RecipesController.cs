@@ -33,7 +33,7 @@ public sealed class RecipesController(
         {
             var favorites = await db.RecipeFavorites
                 .AsNoTracking()
-                .Where(favorite => favorite.UserId == UserId && favorite.Recipe.SourceProvider == "Spoonacular" && favorite.Recipe.ProviderRecipeId != null)
+                .Where(favorite => favorite.UserId == UserId && favorite.Recipe.SourceProvider == "TheMealDB" && favorite.Recipe.ProviderRecipeId != null)
                 .Where(favorite => string.IsNullOrWhiteSpace(query) || favorite.Recipe.Name.Contains(query.Trim()))
                 .OrderByDescending(favorite => favorite.CreatedAt)
                 .Select(recipe => new
@@ -61,7 +61,7 @@ public sealed class RecipesController(
         {
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new
             {
-                message = "Липсва Spoonacular API key. Добави го в User Secrets."
+                message = "Каталогът с рецепти не е наличен."
             });
         }
 
@@ -122,7 +122,7 @@ public sealed class RecipesController(
         {
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new
             {
-                message = "Липсва Spoonacular API key. Добави го в User Secrets."
+                message = "Каталогът с рецепти не е наличен."
             });
         }
 
@@ -138,7 +138,7 @@ public sealed class RecipesController(
                     item.Product.CatalogItemId))
                 .ToListAsync(cancellationToken);
             var isFavorite = await db.RecipeFavorites.AnyAsync(favorite =>
-                favorite.UserId == UserId && favorite.Recipe.SourceProvider == "Spoonacular" && favorite.Recipe.ProviderRecipeId == id.ToString(),
+                favorite.UserId == UserId && favorite.Recipe.SourceProvider == "TheMealDB" && favorite.Recipe.ProviderRecipeId == id.ToString(),
                 cancellationToken);
             var ingredients = details.Ingredients
                 .Select(ingredient => ingredient with
@@ -307,7 +307,7 @@ public sealed class RecipesController(
             var details = await recipeCatalog.GetDetailsAsync(id, cancellationToken);
             var providerId = id.ToString(System.Globalization.CultureInfo.InvariantCulture);
             var favorite = await db.Recipes.SingleOrDefaultAsync(recipe =>
-                recipe.SourceProvider == "Spoonacular" && recipe.ProviderRecipeId == providerId,
+                recipe.SourceProvider == "TheMealDB" && recipe.ProviderRecipeId == providerId,
                 cancellationToken);
             if (favorite is null)
             {
@@ -315,7 +315,7 @@ public sealed class RecipesController(
                 {
                     Name = details.Title[..Math.Min(details.Title.Length, 140)],
                     Source = "External",
-                    SourceProvider = "Spoonacular",
+                    SourceProvider = "TheMealDB",
                     ProviderRecipeId = providerId,
                     SourceName = details.SourceName,
                     SourceUrl = Limit(details.SourceUrl, 2048),
@@ -359,7 +359,7 @@ public sealed class RecipesController(
     {
         var providerId = id.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var favorite = await db.RecipeFavorites.SingleOrDefaultAsync(item =>
-            item.UserId == UserId && item.Recipe.SourceProvider == "Spoonacular" && item.Recipe.ProviderRecipeId == providerId,
+            item.UserId == UserId && item.Recipe.SourceProvider == "TheMealDB" && item.Recipe.ProviderRecipeId == providerId,
             cancellationToken);
         if (favorite is not null)
         {
@@ -416,7 +416,7 @@ public sealed class RecipesController(
                 if (ingredient.CatalogItemId is int externalId)
                 {
                     product = await db.ProductCatalog.FirstOrDefaultAsync(item =>
-                        item.CatalogProvider == "Spoonacular" && item.CatalogItemId == externalId.ToString(), cancellationToken);
+                        item.CatalogProvider == "TheMealDB" && item.CatalogItemId == externalId.ToString(), cancellationToken);
                 }
                 product ??= await db.ProductCatalog.FirstOrDefaultAsync(item => item.Name == name, cancellationToken);
                 var mappedCategoryId = ResolveCategoryId(ingredient.Aisle, name, categories);
@@ -425,7 +425,7 @@ public sealed class RecipesController(
                     product = new ProductCatalogItem
                     {
                         Name = name,
-                        CatalogProvider = ingredient.CatalogItemId is null ? null : "Spoonacular",
+                        CatalogProvider = ingredient.CatalogItemId is null ? null : "TheMealDB",
                         CatalogItemId = ingredient.CatalogItemId?.ToString(System.Globalization.CultureInfo.InvariantCulture),
                         ProductCategoryId = mappedCategoryId
                     };
@@ -437,7 +437,7 @@ public sealed class RecipesController(
                     product.ProductCategoryId ??= mappedCategoryId;
                     if (product.CatalogProvider is null && ingredient.CatalogItemId is not null)
                     {
-                        product.CatalogProvider = "Spoonacular";
+                        product.CatalogProvider = "TheMealDB";
                         product.CatalogItemId = ingredient.CatalogItemId.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
                     }
                 }
@@ -495,7 +495,7 @@ public sealed class RecipesController(
     private static bool PantryMatches(PantryProduct product, RecipeIngredientInfo ingredient)
     {
         if (ingredient.CatalogItemId is int ingredientId &&
-            product.CatalogProvider == "Spoonacular" &&
+            product.CatalogProvider == "TheMealDB" &&
             int.TryParse(product.CatalogItemId, out var productId) && productId == ingredientId)
         {
             return true;

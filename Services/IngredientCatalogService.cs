@@ -1,67 +1,94 @@
+using System.Globalization;
 using System.Text.Json;
-using System.Text.Json.Serialization;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace RecipeApp.Services;
 
+/// <summary>
+/// Ingredient autocomplete backed by TheMealDB's free ingredient list (no API key, no daily limit).
+/// The full list (~900 names) is downloaded once and cached, then searched locally.
+/// </summary>
 public sealed class IngredientCatalogService
 {
-    private const string Provider = "Spoonacular";
+    public const string Provider = "TheMealDB";
+    private const string ListUrl = "https://www.themealdb.com/api/json/v1/1/list.php?i=list";
     private readonly HttpClient httpClient;
-    private readonly IConfiguration configuration;
+    private readonly IMemoryCache cache;
     private readonly ILogger<IngredientCatalogService> logger;
 
-    public IngredientCatalogService(HttpClient httpClient, IConfiguration configuration, ILogger<IngredientCatalogService> logger)
+    public IngredientCatalogService(HttpClient httpClient, IMemoryCache cache, ILogger<IngredientCatalogService> logger)
     {
         this.httpClient = httpClient;
-        this.configuration = configuration;
+        this.cache = cache;
         this.logger = logger;
-        httpClient.Timeout = TimeSpan.FromSeconds(5);
+        httpClient.Timeout = TimeSpan.FromSeconds(15);
+    }
+
+    public async Task<IReadOnlyList<MealDbIngredient>> GetAllAsync(CancellationToken cancellationToken)
+    {
+        var all = await cache.GetOrCreateAsync<IReadOnlyList<MealDbIngredient>>("mealdb:ingredients", async entry =>
+        {
+            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(24);
+            using var response = await httpClient.GetAsync(ListUrl, cancellationToken);
+            response.EnsureSuccessStatusCode();
+            var json = await response.Content.ReadAsStringAsync(cancellationToken);
+            using var document = JsonDocument.Parse(json);
+
+            var list = new List<MealDbIngredient>();
+            if (document.RootElement.TryGetProperty("meals", out var meals) && meals.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in meals.EnumerateArray())
+                {
+                    var name = ReadText(item, "strIngredient");
+                    if (name is null || !int.TryParse(ReadText(item, "idIngredient"), NumberStyles.Integer,
+                            CultureInfo.InvariantCulture, out var id))
+                    {
+                        continue;
+                    }
+
+                    list.Add(new MealDbIngredient(id, name));
+                }
+            }
+
+            logger.LogInformation("Loaded {Count} ingredients from TheMealDB.", list.Count);
+            return list;
+        });
+
+        return all ?? [];
     }
 
     public async Task<IReadOnlyList<IngredientSuggestion>> SearchAsync(string query, CancellationToken cancellationToken)
     {
-        var apiKey = configuration["Spoonacular:ApiKey"];
-        if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            logger.LogWarning("Spoonacular API key is not configured. Showing only local product suggestions.");
-            return [];
-        }
+        var term = query.Trim();
+        if (term.Length < 2) return [];
 
-        var url = "https://api.spoonacular.com/food/ingredients/autocomplete" +
-                  $"?query={Uri.EscapeDataString(query)}&number=8&language=en";
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.Add("x-api-key", apiKey);
-        using var response = await httpClient.SendAsync(request, cancellationToken);
-        if (!response.IsSuccessStatusCode)
-        {
-            logger.LogWarning("Spoonacular ingredient autocomplete returned HTTP {StatusCode}.", (int)response.StatusCode);
-            return [];
-        }
-
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        var results = await JsonSerializer.DeserializeAsync<List<SpoonacularIngredient>>(stream, cancellationToken: cancellationToken);
-        var suggestions = results?
-            .Where(item => !string.IsNullOrWhiteSpace(item.Name))
+        var all = await GetAllAsync(cancellationToken);
+        return all
+            .Where(item => item.Name.Contains(term, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(item => item.Name.StartsWith(term, StringComparison.OrdinalIgnoreCase))
+            .ThenBy(item => item.Name.Length)
+            .Take(8)
             .Select(item => new IngredientSuggestion(
-                item.Name!,
-                item.Id > 0 ? item.Id.ToString() : null,
+                item.Name,
+                item.Id.ToString(CultureInfo.InvariantCulture),
                 Provider,
-                item.Aisle))
-            .ToList() ?? [];
-        logger.LogInformation(
-            "Spoonacular response contained {RawCount} items; {SuggestionCount} had a usable name and {CatalogIdCount} had an ID.",
-            results?.Count ?? 0,
-            suggestions.Count,
-            suggestions.Count(item => item.CatalogItemId is not null));
-        return suggestions;
+                null))
+            .ToList();
     }
 
-    private sealed class SpoonacularIngredient
+    private static string? ReadText(JsonElement element, string property)
     {
-        [JsonPropertyName("id")] public int Id { get; init; }
-        [JsonPropertyName("name")] public string? Name { get; init; }
-        [JsonPropertyName("aisle")] public string? Aisle { get; init; }
+        if (!element.TryGetProperty(property, out var value)) return null;
+        var text = value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString(),
+            JsonValueKind.Number => value.GetRawText(),
+            _ => null
+        };
+        return string.IsNullOrWhiteSpace(text) ? null : text.Trim();
     }
 }
 
 public sealed record IngredientSuggestion(string Name, string? CatalogItemId, string? CatalogProvider, string? Category);
+
+public sealed record MealDbIngredient(int Id, string Name);

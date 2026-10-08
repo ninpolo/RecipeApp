@@ -51,12 +51,12 @@ public sealed class AuthController(RecipeAppContext db, IPasswordHasher<AppUser>
         {
             await db.InventoryItems.Where(item => item.UserId == null)
                 .ExecuteUpdateAsync(update => update.SetProperty(item => item.UserId, user.Id), cancellationToken);
-            var oldFavorites = await db.Recipes.Where(recipe => recipe.IsSaved && recipe.SourceProvider == "Spoonacular")
+            var oldFavorites = await db.Recipes.Where(recipe => recipe.IsSaved && recipe.SourceProvider == "TheMealDB")
                 .Select(recipe => recipe.RecipeId).ToListAsync(cancellationToken);
             foreach (var recipeId in oldFavorites)
                 db.RecipeFavorites.Add(new RecipeFavorite { UserId = user.Id, RecipeId = recipeId });
             await db.SaveChangesAsync(cancellationToken);
-            await db.Recipes.Where(recipe => recipe.IsSaved && recipe.SourceProvider == "Spoonacular")
+            await db.Recipes.Where(recipe => recipe.IsSaved && recipe.SourceProvider == "TheMealDB")
                 .ExecuteUpdateAsync(update => update.SetProperty(recipe => recipe.IsSaved, false), cancellationToken);
         }
 

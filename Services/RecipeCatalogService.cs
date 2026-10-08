@@ -1,31 +1,71 @@
+using System.Globalization;
 using System.Net;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Caching.Memory;
 
 namespace RecipeApp.Services;
 
+/// <summary>
+/// Recipe catalog backed by TheMealDB (free, no API key, no daily quota).
+/// TheMealDB has no "list everything" or multi-ingredient endpoint on the free tier, so this
+/// service builds those features on top of its category / ingredient / name endpoints and
+/// caches everything in memory.
+/// </summary>
 public sealed class RecipeCatalogService
 {
-    private const string Provider = "Spoonacular";
+    public const string Provider = "TheMealDB";
+    private const string BaseUrl = "https://www.themealdb.com/api/json/v1/1/";
+    private const int PageSize = 12;
+
+    // Be polite to the free API: never more than 6 requests in flight at once.
+    private static readonly SemaphoreSlim RequestGate = new(6);
+
+    private static readonly string[] AllCategories =
+    [
+        "Beef", "Breakfast", "Chicken", "Dessert", "Goat", "Lamb", "Miscellaneous",
+        "Pasta", "Pork", "Seafood", "Side", "Starter", "Vegan", "Vegetarian"
+    ];
+
+    // The app's tabs (Bulgarian) -> TheMealDB categories.
+    private static readonly Dictionary<string, string[]> CategoryMap = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Закуска"] = ["Breakfast"],
+        ["Обяд"] = ["Starter", "Side", "Pasta", "Vegetarian", "Vegan", "Miscellaneous"],
+        ["Вечеря"] = ["Beef", "Chicken", "Lamb", "Pork", "Goat", "Seafood", "Pasta"],
+        ["Десерт"] = ["Dessert"]
+    };
+
+    private static readonly Regex WordRegex = new(@"[\p{L}\p{Nd}]+", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static readonly Regex QuantityRegex = new(
+        @"^\s*(?:(?<whole>\d+)\s+(?<n1>\d+)/(?<d1>\d+)|(?<n2>\d+)/(?<d2>\d+)|(?<dec>\d+(?:[.,]\d+)?))",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static readonly Regex StepPrefixRegex = new(
+        @"^\s*(?:step\s*\d+\s*[:.\-)]?|\d+\s*[.)])\s*",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
     private readonly HttpClient httpClient;
-    private readonly IConfiguration configuration;
-    private readonly ILogger<RecipeCatalogService> logger;
+    private readonly IngredientCatalogService ingredients;
     private readonly IMemoryCache cache;
+    private readonly ILogger<RecipeCatalogService> logger;
 
     public RecipeCatalogService(
         HttpClient httpClient,
-        IConfiguration configuration,
+        IngredientCatalogService ingredients,
         ILogger<RecipeCatalogService> logger,
         IMemoryCache cache)
     {
         this.httpClient = httpClient;
-        this.configuration = configuration;
+        this.ingredients = ingredients;
         this.logger = logger;
         this.cache = cache;
-        httpClient.Timeout = TimeSpan.FromSeconds(12);
+        httpClient.Timeout = TimeSpan.FromSeconds(15);
     }
 
-    public bool IsConfigured => !string.IsNullOrWhiteSpace(configuration["Spoonacular:ApiKey"]);
+    // TheMealDB needs no key, so the catalog is always available.
+    public bool IsConfigured => true;
 
     public async Task<RecipeSearchPage> SearchAsync(
         IReadOnlyList<string> pantryIngredients,
@@ -35,38 +75,43 @@ public sealed class RecipeCatalogService
         int page,
         CancellationToken cancellationToken)
     {
-        var apiKey = configuration["Spoonacular:ApiKey"];
-        if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            throw new RecipeCatalogException(
-                "Липсва Spoonacular API key. Добави го в User Secrets, за да търсиш рецепти.");
-        }
-
-        var ingredients = pantryIngredients
+        var pantry = pantryIngredients
             .Where(name => !string.IsNullOrWhiteSpace(name))
             .Select(name => name.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Take(20)
             .ToArray();
-        var normalizedQuery = query?.Trim();
-        var normalizedCategory = category?.Trim();
-        var selectedPage = usePantry ? 1 : Math.Clamp(page, 1, 76);
-        var isSimplePantrySearch = usePantry &&
-            ingredients.Length > 0 &&
-            string.IsNullOrWhiteSpace(normalizedQuery) &&
-            string.IsNullOrWhiteSpace(normalizedCategory);
-        var cacheKey = $"recipes:{string.Join('|', ingredients)}:{usePantry}:{normalizedQuery}:{normalizedCategory}:{selectedPage}";
-        if (cache.TryGetValue(cacheKey, out RecipeSearchPage? cached) && cached is not null)
+        var text = query?.Trim();
+        var selectedPage = Math.Max(1, page);
+
+        IReadOnlyList<Meal> candidates;
+        if (!string.IsNullOrWhiteSpace(text))
         {
-            return cached;
+            candidates = await SearchByTextAsync(text, cancellationToken);
+        }
+        else if (usePantry && pantry.Length > 0)
+        {
+            candidates = await SearchByPantryAsync(pantry, cancellationToken);
+        }
+        else
+        {
+            candidates = (await GetAllMealsAsync(cancellationToken))
+                .OrderBy(meal => meal.Title, StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
 
-        var results = isSimplePantrySearch
-            ? ToSinglePage(await SearchByIngredientsAsync(ingredients, apiKey, cancellationToken))
-            : await SearchComplexAsync(ingredients, usePantry, normalizedQuery, normalizedCategory, selectedPage, apiKey, cancellationToken);
+        var categoryIds = await GetCategoryIdsAsync(category, cancellationToken);
+        if (categoryIds is not null)
+        {
+            candidates = candidates.Where(meal => categoryIds.Contains(meal.Id)).ToList();
+        }
 
-        cache.Set(cacheKey, results, TimeSpan.FromMinutes(10));
-        return results;
+        var total = candidates.Count;
+        var pageItems = candidates.Skip((selectedPage - 1) * PageSize).Take(PageSize).ToArray();
+        var pantryForCounts = usePantry && pantry.Length > 0 ? pantry : null;
+        var results = await Task.WhenAll(
+            pageItems.Select(meal => ToResultAsync(meal, pantryForCounts, cancellationToken)));
+        return new RecipeSearchPage(results, total, selectedPage, PageSize);
     }
 
     public async Task<RecipeDetails> GetDetailsAsync(int recipeId, CancellationToken cancellationToken)
@@ -76,300 +121,458 @@ public sealed class RecipeCatalogService
             throw new ArgumentOutOfRangeException(nameof(recipeId));
         }
 
-        var apiKey = configuration["Spoonacular:ApiKey"];
-        if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            throw new RecipeCatalogException(
-                "Липсва Spoonacular API key. Добави го в User Secrets, за да отвориш рецептата.");
-        }
-
-        var cacheKey = $"recipe-details:{recipeId}";
+        var cacheKey = $"mealdb:details:{recipeId.ToString(CultureInfo.InvariantCulture)}";
         if (cache.TryGetValue(cacheKey, out RecipeDetails? cached) && cached is not null)
         {
             return cached;
         }
 
-        var json = await SendAsync(
-            $"/recipes/{recipeId}/information?includeNutrition=false",
-            apiKey,
-            cancellationToken);
-        using var document = JsonDocument.Parse(json);
-        var root = document.RootElement;
+        using var document = await GetJsonAsync($"lookup.php?i={recipeId.ToString(CultureInfo.InvariantCulture)}", cancellationToken);
+        var meal = ReadMeals(document.RootElement).FirstOrDefault();
+        if (meal.ValueKind != JsonValueKind.Object)
+        {
+            throw new RecipeCatalogException("Рецептата не е намерена.");
+        }
 
-        var ingredients = ReadArray(root, "extendedIngredients")
-            .Select(item => new RecipeIngredientInfo(
-                ReadString(item, "name") ?? ReadString(item, "originalName") ?? "Продукт",
-                ReadString(item, "original") ?? ReadString(item, "originalName") ?? ReadString(item, "name") ?? "Продукт",
-                ReadDecimal(item, "amount") ?? 1m,
-                ReadString(item, "unit") ?? string.Empty,
-                ReadString(item, "image"),
-                ReadInt(item, "id"),
-                ReadArray(item, "meta").Any(meta => meta.ValueKind == JsonValueKind.String &&
-                    meta.GetString()?.Contains("optional", StringComparison.OrdinalIgnoreCase) == true),
+        // Map ingredient names to TheMealDB ingredient ids (best effort).
+        var idByName = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (var item in await ingredients.GetAllAsync(cancellationToken))
+            {
+                idByName.TryAdd(item.Name, item.Id);
+            }
+        }
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested &&
+                                          exception is HttpRequestException or TaskCanceledException)
+        {
+            logger.LogWarning("Could not load the ingredient list; continuing without ingredient ids.");
+        }
+
+        var ingredientInfos = new List<RecipeIngredientInfo>();
+        for (var index = 1; index <= 20; index++)
+        {
+            var name = ReadString(meal, $"strIngredient{index}");
+            if (name is null) continue;
+
+            var measure = ReadString(meal, $"strMeasure{index}") ?? string.Empty;
+            var (amount, unit) = ParseMeasure(measure);
+            int? catalogId = idByName.TryGetValue(name, out var id) ? id : null;
+            ingredientInfos.Add(new RecipeIngredientInfo(
+                name,
+                measure.Length == 0 ? name : $"{measure} {name}",
+                amount,
+                unit,
+                $"https://www.themealdb.com/images/ingredients/{Uri.EscapeDataString(name)}-Small.png",
+                catalogId,
                 false,
-                CleanIngredientName(ReadString(item, "nameClean") ?? ReadString(item, "name")),
-                ReadString(item, "aisle")))
-            .ToArray();
-        var steps = ReadSteps(root);
-        var sourceUrl = ReadString(root, "sourceUrl") ?? ReadString(root, "spoonacularSourceUrl");
-        var details = new RecipeDetails(
-            ReadInt(root, "id") ?? recipeId,
-            ReadString(root, "title") ?? "Рецепта",
-            ReadString(root, "image"),
-            ReadInt(root, "readyInMinutes"),
-            ReadInt(root, "servings"),
-            ReadString(root, "sourceName") ?? Provider,
-            sourceUrl,
-            ingredients,
-            steps);
+                false,
+                name,
+                null));
+        }
 
-        cache.Set(cacheKey, details, TimeSpan.FromHours(1));
+        var details = new RecipeDetails(
+            recipeId,
+            Truncate(ReadString(meal, "strMeal") ?? "Рецепта", 140),
+            ReadString(meal, "strMealThumb"),
+            null,
+            null,
+            Provider,
+            ReadString(meal, "strSource"),
+            ingredientInfos,
+            ParseSteps(ReadString(meal, "strInstructions")));
+        cache.Set(cacheKey, details, TimeSpan.FromHours(24));
         return details;
     }
 
-    private async Task<IReadOnlyList<RecipeSearchResult>> SearchByIngredientsAsync(
-        IReadOnlyList<string> ingredients,
-        string apiKey,
-        CancellationToken cancellationToken)
+    // ------------------------------------------------------------------ searching
+
+    private async Task<IReadOnlyList<Meal>> SearchByTextAsync(string text, CancellationToken cancellationToken)
     {
-        var query = $"ingredients={Uri.EscapeDataString(string.Join(',', ingredients))}&number=12&ranking=2&ignorePantry=true";
-        var json = await SendAsync($"/recipes/findByIngredients?{query}", apiKey, cancellationToken);
-        using var document = JsonDocument.Parse(json);
-        return document.RootElement.EnumerateArray()
-            .Select(item => new RecipeSearchResult(
-                ReadInt(item, "id") ?? 0,
-                ReadString(item, "title") ?? "Рецепта",
-                ReadString(item, "image"),
-                null,
-                ReadInt(item, "usedIngredientCount"),
-                ReadInt(item, "missedIngredientCount"),
-                null,
-                null))
-            .Where(recipe => recipe.Id > 0)
-            .ToArray();
+        var words = Words(text);
+        if (words.Length == 0) return [];
+
+        // 1) Recipes whose TITLE is about what was typed ("eggs" -> egg dishes, not every
+        //    cake that happens to contain an egg). "eggplant" does not count as "egg".
+        var searchTerms = new List<string> { text };
+        var normalizedText = string.Join(' ', words);
+        if (!string.Equals(normalizedText, text.ToLowerInvariant(), StringComparison.Ordinal))
+        {
+            searchTerms.Add(normalizedText);
+        }
+
+        var byName = new List<Meal>();
+        foreach (var term in searchTerms)
+        {
+            byName.AddRange(await SearchByNameAsync(term, cancellationToken));
+        }
+
+        var titleMatches = byName
+            .GroupBy(meal => meal.Id)
+            .Select(group => group.First())
+            .Where(meal =>
+            {
+                var titleWords = Words(meal.Title);
+                return words.All(word => titleWords.Contains(word));
+            })
+            .ToList();
+        if (titleMatches.Count > 0)
+        {
+            return titleMatches;
+        }
+
+        // 2) No title contains it, so fall back to recipes that use it as an ingredient.
+        var matchingIngredients = (await ingredients.GetAllAsync(cancellationToken))
+            .Where(item =>
+            {
+                var itemWords = Words(item.Name);
+                return words.All(word => itemWords.Contains(word));
+            })
+            .OrderBy(item => Words(item.Name).Length)
+            .Take(3)
+            .ToList();
+
+        var meals = new List<Meal>();
+        foreach (var item in matchingIngredients)
+        {
+            meals.AddRange(await FilterByIngredientAsync(item.Name, cancellationToken));
+        }
+
+        return meals
+            .GroupBy(meal => meal.Id)
+            .Select(group => group.First())
+            .OrderBy(meal => meal.Title, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
-    private static RecipeSearchPage ToSinglePage(IReadOnlyList<RecipeSearchResult> results) =>
-        new(results, results.Count, 1, 12);
+    private async Task<IReadOnlyList<Meal>> SearchByPantryAsync(string[] pantry, CancellationToken cancellationToken)
+    {
+        var allIngredients = await ingredients.GetAllAsync(cancellationToken);
 
-    private async Task<RecipeSearchPage> SearchComplexAsync(
-        IReadOnlyList<string> pantryIngredients,
-        bool usePantry,
-        string? query,
-        string? category,
-        int page,
-        string apiKey,
+        // For every pantry product, find recipes that use it. A recipe's score is how many
+        // different pantry products it uses.
+        var perProduct = await Task.WhenAll(pantry.Select(async product =>
+        {
+            var words = Words(product);
+            if (words.Length == 0) return Array.Empty<Meal>();
+
+            var names = allIngredients
+                .Where(item =>
+                {
+                    var itemWords = Words(item.Name);
+                    return words.All(word => itemWords.Contains(word));
+                })
+                .OrderBy(item => Words(item.Name).Length)
+                .Take(2)
+                .Select(item => item.Name)
+                .ToArray();
+
+            var meals = new List<Meal>();
+            foreach (var name in names)
+            {
+                meals.AddRange(await FilterByIngredientAsync(name, cancellationToken));
+            }
+
+            return meals.GroupBy(meal => meal.Id).Select(group => group.First()).ToArray();
+        }));
+
+        var scores = new Dictionary<int, (Meal Item, int Score)>();
+        foreach (var meals in perProduct)
+        {
+            foreach (var meal in meals)
+            {
+                scores[meal.Id] = scores.TryGetValue(meal.Id, out var existing)
+                    ? (meal, existing.Score + 1)
+                    : (meal, 1);
+            }
+        }
+
+        return scores.Values
+            .OrderByDescending(entry => entry.Score)
+            .ThenBy(entry => entry.Item.Title, StringComparer.OrdinalIgnoreCase)
+            .Select(entry => entry.Item)
+            .ToList();
+    }
+
+    private async Task<RecipeSearchResult> ToResultAsync(Meal meal, string[]? pantry, CancellationToken cancellationToken)
+    {
+        int? used = null;
+        int? missed = null;
+        if (pantry is not null)
+        {
+            try
+            {
+                var details = await GetDetailsAsync(meal.Id, cancellationToken);
+                var total = details.Ingredients.Count;
+                var matched = details.Ingredients.Count(ingredient => pantry.Any(product => NamesMatch(product, ingredient.Name)));
+                used = matched;
+                missed = total - matched;
+            }
+            catch (Exception exception) when (!cancellationToken.IsCancellationRequested &&
+                                              exception is RecipeCatalogException or HttpRequestException or TaskCanceledException)
+            {
+                logger.LogWarning("Could not count pantry ingredients for recipe {RecipeId}.", meal.Id);
+            }
+        }
+
+        return new RecipeSearchResult(meal.Id, meal.Title, meal.ImageUrl, null, used, missed, Provider, null);
+    }
+
+    // ------------------------------------------------------------------ data access
+
+    private async Task<IReadOnlyList<Meal>> GetAllMealsAsync(CancellationToken cancellationToken)
+    {
+        var all = await cache.GetOrCreateAsync<IReadOnlyList<Meal>>("mealdb:all", async entry =>
+        {
+            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(12);
+            var lists = await Task.WhenAll(AllCategories.Select(name => FilterByCategoryAsync(name, cancellationToken)));
+            return lists.SelectMany(list => list).GroupBy(meal => meal.Id).Select(group => group.First()).ToList();
+        });
+        return all ?? [];
+    }
+
+    private async Task<HashSet<int>?> GetCategoryIdsAsync(string? category, CancellationToken cancellationToken)
+    {
+        var selected = category?.Trim();
+        if (string.IsNullOrWhiteSpace(selected)) return null;
+
+        var names = CategoryMap.TryGetValue(selected, out var mapped)
+            ? mapped
+            : AllCategories.Where(name => string.Equals(name, selected, StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (names.Length == 0) return null;
+
+        var lists = await Task.WhenAll(names.Select(name => FilterByCategoryAsync(name, cancellationToken)));
+        return lists.SelectMany(list => list).Select(meal => meal.Id).ToHashSet();
+    }
+
+    private Task<IReadOnlyList<Meal>> FilterByCategoryAsync(string category, CancellationToken cancellationToken) =>
+        CachedMealsAsync(
+            $"mealdb:cat:{category.ToLowerInvariant()}",
+            TimeSpan.FromHours(12),
+            $"filter.php?c={Uri.EscapeDataString(category)}",
+            cancellationToken);
+
+    private Task<IReadOnlyList<Meal>> FilterByIngredientAsync(string ingredient, CancellationToken cancellationToken) =>
+        CachedMealsAsync(
+            $"mealdb:ing:{ingredient.ToLowerInvariant()}",
+            TimeSpan.FromHours(12),
+            $"filter.php?i={Uri.EscapeDataString(ingredient.Replace(' ', '_'))}",
+            cancellationToken);
+
+    private Task<IReadOnlyList<Meal>> SearchByNameAsync(string term, CancellationToken cancellationToken) =>
+        CachedMealsAsync(
+            $"mealdb:name:{term.ToLowerInvariant()}",
+            TimeSpan.FromHours(6),
+            $"search.php?s={Uri.EscapeDataString(term)}",
+            cancellationToken);
+
+    private async Task<IReadOnlyList<Meal>> CachedMealsAsync(
+        string cacheKey,
+        TimeSpan lifetime,
+        string relativeUrl,
         CancellationToken cancellationToken)
     {
-        const int pageSize = 12;
-        var parameters = new List<string>
+        var meals = await cache.GetOrCreateAsync<IReadOnlyList<Meal>>(cacheKey, async entry =>
         {
-            $"number={pageSize}",
-            "addRecipeInformation=true",
-            "fillIngredients=true",
-            "instructionsRequired=true",
-            "sort=popularity",
-            "sortDirection=desc"
+            entry.AbsoluteExpirationRelativeToNow = lifetime;
+            using var document = await GetJsonAsync(relativeUrl, cancellationToken);
+            return ReadMeals(document.RootElement).Select(ToMeal).OfType<Meal>().ToList();
+        });
+        return meals ?? [];
+    }
+
+    private async Task<JsonDocument> GetJsonAsync(string relativeUrl, CancellationToken cancellationToken)
+    {
+        await RequestGate.WaitAsync(cancellationToken);
+        try
+        {
+            using var response = await httpClient.GetAsync(BaseUrl + relativeUrl, cancellationToken);
+            if (response.StatusCode == HttpStatusCode.TooManyRequests)
+            {
+                throw new RecipeCatalogException("Каталогът с рецепти е претоварен. Опитай отново след малко.");
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                logger.LogWarning("TheMealDB returned HTTP {StatusCode} for {Url}.", (int)response.StatusCode, relativeUrl);
+                throw new RecipeCatalogException("Каталогът с рецепти не отговори. Опитай отново.");
+            }
+
+            var text = await response.Content.ReadAsStringAsync(cancellationToken);
+            try
+            {
+                // TheMealDB sometimes answers with an empty body instead of {"meals":null}.
+                return JsonDocument.Parse(string.IsNullOrWhiteSpace(text) ? "{\"meals\":null}" : text);
+            }
+            catch (JsonException)
+            {
+                return JsonDocument.Parse("{\"meals\":null}");
+            }
+        }
+        finally
+        {
+            RequestGate.Release();
+        }
+    }
+
+    // ------------------------------------------------------------------ helpers
+
+    private sealed record Meal(int Id, string Title, string? ImageUrl);
+
+    private static List<JsonElement> ReadMeals(JsonElement root)
+    {
+        if (root.TryGetProperty("meals", out var meals) && meals.ValueKind == JsonValueKind.Array)
+        {
+            return meals.EnumerateArray().ToList();
+        }
+
+        return [];
+    }
+
+    private static Meal? ToMeal(JsonElement element)
+    {
+        if (!int.TryParse(ReadString(element, "idMeal"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var id) || id <= 0)
+        {
+            return null;
+        }
+
+        var title = ReadString(element, "strMeal");
+        return string.IsNullOrWhiteSpace(title) ? null : new Meal(id, Truncate(title, 140), ReadString(element, "strMealThumb"));
+    }
+
+    private static string? ReadString(JsonElement element, string property)
+    {
+        if (!element.TryGetProperty(property, out var value)) return null;
+        var text = value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString(),
+            JsonValueKind.Number => value.GetRawText(),
+            _ => null
         };
+        return string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+    }
 
-        if (!string.IsNullOrWhiteSpace(query))
+    private static string Truncate(string value, int maxLength) =>
+        value.Length <= maxLength ? value : value[..maxLength];
+
+    // Lower-cased words with a naive singular form: "Eggs" -> "egg", "Tomatoes" -> "tomato".
+    private static string[] Words(string value) =>
+        WordRegex.Matches(value.ToLowerInvariant())
+            .Select(match => Singular(match.Value))
+            .ToArray();
+
+    private static string Singular(string word)
+    {
+        if (word.Length > 4 && word.EndsWith("ies", StringComparison.Ordinal)) return word[..^3] + "y";
+        if (word.Length > 4 && word.EndsWith("oes", StringComparison.Ordinal)) return word[..^2];
+        if (word.Length > 3 && word.EndsWith('s') && !word.EndsWith("ss", StringComparison.Ordinal)) return word[..^1];
+        return word;
+    }
+
+    // "chicken" matches "Chicken Breast"; "egg" matches "Eggs".
+    private static bool NamesMatch(string pantryProduct, string recipeIngredient)
+    {
+        var product = Words(pantryProduct);
+        var ingredient = Words(recipeIngredient);
+        if (product.Length == 0 || ingredient.Length == 0) return false;
+        return product.All(word => ingredient.Contains(word)) || ingredient.All(word => product.Contains(word));
+    }
+
+    private static (decimal Amount, string Unit) ParseMeasure(string measure)
+    {
+        var trimmed = measure.Trim();
+        var match = QuantityRegex.Match(trimmed);
+        if (!match.Success)
         {
-            parameters.Add($"query={Uri.EscapeDataString(query)}");
+            return (1m, Truncate(trimmed, 20));
         }
 
-        var recipeType = GetRecipeType(category);
-        if (recipeType is not null)
+        decimal amount;
+        if (match.Groups["whole"].Success)
         {
-            parameters.Add($"type={Uri.EscapeDataString(recipeType)}");
+            var denominator = ToNumber(match.Groups["d1"].Value);
+            amount = ToNumber(match.Groups["whole"].Value) +
+                     (denominator > 0 ? ToNumber(match.Groups["n1"].Value) / denominator : 0m);
         }
-
-        if (usePantry && pantryIngredients.Count > 0)
+        else if (match.Groups["n2"].Success)
         {
-            parameters.Add($"includeIngredients={Uri.EscapeDataString(string.Join(',', pantryIngredients))}");
+            var denominator = ToNumber(match.Groups["d2"].Value);
+            amount = denominator > 0 ? ToNumber(match.Groups["n2"].Value) / denominator : 0m;
         }
         else
         {
-            parameters.Add($"offset={(page - 1) * pageSize}");
+            amount = ToNumber(match.Groups["dec"].Value);
         }
 
-        var json = await SendAsync($"/recipes/complexSearch?{string.Join('&', parameters)}", apiKey, cancellationToken);
-        using var document = JsonDocument.Parse(json);
-        if (!TryGetProperty(document.RootElement, "results", out var results) || results.ValueKind != JsonValueKind.Array)
+        var unit = trimmed[match.Length..].Trim();
+        return (amount > 0 ? Math.Round(amount, 2) : 1m, Truncate(unit, 20));
+    }
+
+    private static decimal ToNumber(string value) =>
+        decimal.TryParse(value.Replace(',', '.'), NumberStyles.Number, CultureInfo.InvariantCulture, out var number)
+            ? number
+            : 0m;
+
+    private static List<RecipeStepInfo> ParseSteps(string? instructions)
+    {
+        if (string.IsNullOrWhiteSpace(instructions)) return [];
+
+        var lines = instructions
+            .Replace("\r", "\n")
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(line => StepPrefixRegex.Replace(line, string.Empty).Trim())
+            .Where(line => line.Length > 0)
+            .ToList();
+
+        // Some recipes are one giant paragraph: group sentences into readable steps.
+        if (lines.Count == 1 && lines[0].Length > 350)
         {
-            return new RecipeSearchPage([], 0, page, pageSize);
+            lines = GroupSentences(lines[0]);
         }
 
-        var recipes = results.EnumerateArray()
-            .Select(item =>
-            {
-                var extendedIngredients = ReadArray(item, "extendedIngredients");
-                int? usedCount = null;
-                int? missedCount = null;
-                if (usePantry && pantryIngredients.Count > 0)
-                {
-                    usedCount = extendedIngredients
-                        .Count(recipeIngredient => pantryIngredients.Any(pantry => IngredientMatches(
-                            pantry,
-                            ReadString(recipeIngredient, "name") ?? ReadString(recipeIngredient, "original") ?? string.Empty)));
-                    missedCount = Math.Max(0, extendedIngredients.Length - usedCount.Value);
-                }
-
-                return new RecipeSearchResult(
-                    ReadInt(item, "id") ?? 0,
-                    ReadString(item, "title") ?? "Рецепта",
-                    ReadString(item, "image"),
-                    ReadInt(item, "readyInMinutes"),
-                    usedCount,
-                    missedCount,
-                    ReadString(item, "sourceName") ?? Provider,
-                    ReadString(item, "sourceUrl") ?? ReadString(item, "spoonacularSourceUrl"));
-            })
-            .Where(recipe => recipe.Id > 0)
-            .ToArray();
-        var totalResults = ReadInt(document.RootElement, "totalResults") ?? recipes.Length;
-        return new RecipeSearchPage(recipes, totalResults, page, pageSize);
-    }
-
-    private async Task<string> SendAsync(string pathAndQuery, string apiKey, CancellationToken cancellationToken)
-    {
-        using var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.spoonacular.com{pathAndQuery}");
-        request.Headers.Add("x-api-key", apiKey);
-        using var response = await httpClient.SendAsync(request, cancellationToken);
-        if (!response.IsSuccessStatusCode)
-        {
-            logger.LogWarning(
-                "{Provider} recipe request returned HTTP {StatusCode}.",
-                Provider,
-                (int)response.StatusCode);
-            throw new RecipeCatalogException(GetProviderErrorMessage(response.StatusCode));
-        }
-
-        return await response.Content.ReadAsStringAsync(cancellationToken);
-    }
-
-    private static string GetProviderErrorMessage(HttpStatusCode statusCode) => statusCode switch
-    {
-        HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden =>
-            "Spoonacular не прие ключа. Провери API key в User Secrets.",
-        HttpStatusCode.PaymentRequired or HttpStatusCode.TooManyRequests =>
-            "Достигнат е лимитът на Spoonacular. Опитай отново по-късно.",
-        _ => "Каталогът с рецепти временно не отговаря. Опитай отново след малко."
-    };
-
-    private static string? GetRecipeType(string? category) => category switch
-    {
-        "Закуска" => "breakfast",
-        "Обяд" or "Вечеря" => "main course",
-        "Десерт" => "dessert",
-        "Салата" => "salad",
-        _ => null
-    };
-
-    private static bool IngredientMatches(string pantryName, string recipeName)
-    {
-        var pantryWords = NormalizeIngredient(pantryName);
-        var recipeWords = NormalizeIngredient(recipeName);
-        return pantryWords.Length > 1 &&
-            (pantryWords == recipeWords ||
-             pantryWords.Contains(recipeWords, StringComparison.Ordinal) ||
-             recipeWords.Contains(pantryWords, StringComparison.Ordinal));
-    }
-
-    private static string NormalizeIngredient(string value)
-    {
-        var words = value.ToLowerInvariant()
-            .Split([' ', '-', '_', ','], StringSplitOptions.RemoveEmptyEntries)
-            .Select(word => new string(word.Where(char.IsLetterOrDigit).ToArray()))
-            .Where(word => word.Length > 0)
-            .Select(word => word.Length > 4 && word.EndsWith("ies", StringComparison.Ordinal)
-                ? word[..^3] + "y"
-                : word.Length > 3 && word.EndsWith('s')
-                    ? word[..^1]
-                    : word);
-        return string.Join(' ', words);
-    }
-
-    private static RecipeStepInfo[] ReadSteps(JsonElement root)
-    {
         var steps = new List<RecipeStepInfo>();
-        foreach (var instructionBlock in ReadArray(root, "analyzedInstructions"))
+        foreach (var line in lines)
         {
-            foreach (var step in ReadArray(instructionBlock, "steps"))
+            foreach (var chunk in SplitLongText(line, 900))
             {
-                var text = ReadString(step, "step");
-                if (!string.IsNullOrWhiteSpace(text))
-                {
-                    steps.Add(new RecipeStepInfo(steps.Count + 1, text.Trim()));
-                }
+                steps.Add(new RecipeStepInfo(steps.Count + 1, chunk));
             }
         }
 
-        if (steps.Count == 0)
+        return steps;
+    }
+
+    private static List<string> GroupSentences(string text)
+    {
+        var groups = new List<string>();
+        var current = string.Empty;
+        foreach (var sentence in Regex.Split(text, @"(?<=[.!?])\s+"))
         {
-            var instructions = ReadString(root, "instructions");
-            if (!string.IsNullOrWhiteSpace(instructions))
+            if (string.IsNullOrWhiteSpace(sentence)) continue;
+            current = current.Length == 0 ? sentence : $"{current} {sentence}";
+            if (current.Length >= 250)
             {
-                var plainText = System.Net.WebUtility.HtmlDecode(
-                    System.Text.RegularExpressions.Regex.Replace(instructions, "<[^>]+>", " "));
-                var paragraphs = plainText.Split(['\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-                steps.AddRange(paragraphs.Select((text, index) => new RecipeStepInfo(index + 1, text)));
+                groups.Add(current);
+                current = string.Empty;
             }
         }
 
-        return steps.ToArray();
+        if (current.Length > 0) groups.Add(current);
+        return groups;
     }
 
-    private static JsonElement[] ReadArray(JsonElement element, string propertyName) =>
-        TryGetProperty(element, propertyName, out var value) && value.ValueKind == JsonValueKind.Array
-            ? value.EnumerateArray().ToArray()
-            : [];
-
-    private static string? ReadString(JsonElement element, string propertyName) =>
-        TryGetProperty(element, propertyName, out var value) && value.ValueKind == JsonValueKind.String
-            ? value.GetString()
-            : null;
-
-    private static int? ReadInt(JsonElement element, string propertyName) =>
-        TryGetProperty(element, propertyName, out var value) && value.TryGetInt32(out var result)
-            ? result
-            : null;
-
-    private static decimal? ReadDecimal(JsonElement element, string propertyName) =>
-        TryGetProperty(element, propertyName, out var value) && value.TryGetDecimal(out var result)
-            ? result
-            : null;
-
-    private static string? CleanIngredientName(string? value)
+    // The database stores a step in at most 1000 characters.
+    private static IEnumerable<string> SplitLongText(string text, int maxLength)
     {
-        if (string.IsNullOrWhiteSpace(value)) return value;
-        var name = System.Net.WebUtility.HtmlDecode(value).Trim();
-        name = System.Text.RegularExpressions.Regex.Replace(
-            name,
-            @"\s+(?:from|in)\s+the\s+(?:(?:refrigerated|frozen|grocery|produce)\s+)?section\b.*$",
-            string.Empty,
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        name = System.Text.RegularExpressions.Regex.Replace(
-            name,
-            @"\s*[-–—]\s*(?:beat|beaten|chopped|minced|sliced|grated|diced|crushed|mashed|shredded|peeled)\b.*$",
-            string.Empty,
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        name = System.Text.RegularExpressions.Regex.Replace(
-            name,
-            @"^(?:block|can|package|bag|box|jar|bottle|clove|head|bunch|stalk|sprig)\s+(?:of\s+)?",
-            string.Empty,
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        name = System.Text.RegularExpressions.Regex.Replace(name, @"\s+", " ").Trim(' ', ',', ';', '.');
-        return name.Length == 0 ? value : name;
-    }
-
-    private static bool TryGetProperty(JsonElement element, string propertyName, out JsonElement value)
-    {
-        if (element.ValueKind == JsonValueKind.Object && element.TryGetProperty(propertyName, out value))
+        while (text.Length > maxLength)
         {
-            return true;
+            var cut = text.LastIndexOf(' ', maxLength);
+            if (cut <= 0) cut = maxLength;
+            yield return text[..cut].Trim();
+            text = text[cut..].Trim();
         }
-        value = default;
-        return false;
+
+        if (text.Length > 0) yield return text;
     }
 }
 
@@ -414,5 +617,5 @@ public sealed record RecipeIngredientInfo(
     bool IsInPantry = false,
     string? CatalogName = null,
     string? Aisle = null);
-public sealed record RecipeStepInfo(int Number, string Instruction);
 
+public sealed record RecipeStepInfo(int Number, string Instruction);
